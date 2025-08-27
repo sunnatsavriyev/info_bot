@@ -5,7 +5,9 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import asyncpg
 from decouple import config
-
+# ================================
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 # ================================
 # Telegram & Guruh konfiguratsiyasi
 API_TOKEN = config("API_TOKEN")
@@ -191,6 +193,42 @@ async def set_station(callback: types.CallbackQuery):
 
 
 
+@dp.callback_query(F.data.startswith("setstation:"))
+async def set_station(callback: types.CallbackQuery):
+    _, new_id, station_id = callback.data.split(":")
+    new_id, station_id = int(new_id), int(station_id)
+
+    await db_conn.execute("""
+        INSERT INTO station_heads(head_telegram_id, station_id)
+        VALUES($1, $2)
+        ON CONFLICT(head_telegram_id) DO UPDATE SET station_id=$2
+    """, new_id, station_id)
+
+    station_name = await db_conn.fetchval("SELECT name FROM stations WHERE id=$1", station_id)
+
+    # Admin uchun xabar
+    await callback.message.edit_text(
+        f"✅ {new_id} boshliq qilib qo‘shildi.\n🏢 Bekat: {station_name}"
+    )
+
+    # Guruhga xabar
+    await send_to_group(
+        f"👑 Yangi boshliq qo‘shildi!✅\n\n🆔 {new_id}\n🏢 Bekat: {station_name}"
+    )
+
+    # Yangi boshliqning o‘ziga xabar
+    try:
+        await bot.send_message(
+            new_id,
+            f"🎉 Tabriklaymiz!\nSiz {station_name} bekatining boshlig‘i qilib tayinlandingiz."
+        )
+    except Exception as e:
+        # Agar foydalanuvchi botni start qilmagan bo‘lsa xato chiqadi
+        print(f"Xabar yuborilmadi: {e}")
+
+    user_states.pop(callback.from_user.id, None)
+
+
 
 # ================================
 # EDIT HEAD
@@ -237,9 +275,24 @@ async def edit_head_id(callback: types.CallbackQuery):
 async def edit_head_setstation(callback: types.CallbackQuery):
     _, head_id, new_station_id = callback.data.split(":")
     head_id, new_station_id = int(head_id), int(new_station_id)
+
     await db_conn.execute("UPDATE station_heads SET station_id=$1 WHERE head_telegram_id=$2", new_station_id, head_id)
     station_name = await db_conn.fetchval("SELECT name FROM stations WHERE id=$1", new_station_id)
-    await callback.message.edit_text(f"✅ {head_id} boshliq yangilandi.\n🏢 Bekat: {station_name}")
+
+    # Admin uchun xabar
+    await callback.message.edit_text(f"✅ {head_id} boshliq yangilandi.\n🏢 Yangi bekat: {station_name}")
+
+    # Guruhga xabar
+    await send_to_group(f"✏️ Boshliq yangilandi!\n\n🆔 {head_id}\n🏢 Yangi bekat: {station_name}")
+
+    # Boshliqning o‘ziga xabar
+    try:
+        await bot.send_message(
+            head_id,
+            f"ℹ️ Sizning boshliq maqomingiz yangilandi.\n🏢 Endi siz {station_name} bekatiga boshliq qilib tayinlandingiz."
+        )
+    except Exception as e:
+        print(f"Xabar yuborilmadi: {e}")
 
 
 # ================================
@@ -264,17 +317,42 @@ async def delete_head(message: types.Message):
 @dp.callback_query(F.data.startswith("delete_head_id:"))
 async def delete_head_id(callback: types.CallbackQuery):
     _, head_id = callback.data.split(":")
-    await db_conn.execute("DELETE FROM station_heads WHERE head_telegram_id=$1", int(head_id))
-    await callback.message.edit_text(f"✅ {head_id} boshliq o‘chirildi.")
+    head_id = int(head_id)
+
+    # O‘chirishdan oldin bekatni olish
+    station_name = await db_conn.fetchval("SELECT name FROM stations WHERE head_telegram_id=$1", head_id)
+
+    await db_conn.execute("DELETE FROM station_heads WHERE head_telegram_id=$1", head_id)
+
+    # Admin uchun xabar
+    await callback.message.edit_text(f"✅ {head_id} boshliq o‘chirildi.\n🏢 Bekat: {station_name}")
+
+    # Guruhga xabar
+    await send_to_group(f"🗑 Boshliq o‘chirildi!\n\n🆔 {head_id}\n🏢 Bekat: {station_name}")
+
+    # Boshliqning o‘ziga xabar
+    try:
+        await bot.send_message(
+            head_id,
+            f"⚠️ Siz {station_name} bekati boshlig‘i lavozimidan ozod qilindingiz."
+        )
+    except Exception as e:
+        print(f"Xabar yuborilmadi: {e}")
 
 
 
+
+
+
+# ========== STATE ==========
+class WorkerSelect(StatesGroup):
+    waiting_for_number = State()
 
 
 # ================================
 # ALL WORKERS
 @dp.message(Command("all_workers"))
-async def all_workers(message: types.Message):
+async def all_workers(message: types.Message, state: FSMContext):
     if message.from_user.id not in SUPERADMINS:
         return await message.answer("❌ Sizda ruxsat yo‘q.")
 
@@ -286,8 +364,10 @@ async def all_workers(message: types.Message):
     await message.answer("🏢 Qaysi bekat xodimlarini ko‘rmoqchisiz?", reply_markup=kb.as_markup())
 
 
+# ================================
+# WORKERS LIST
 @dp.callback_query(F.data.startswith("all_workers_station:"))
-async def all_workers_station(callback: types.CallbackQuery):
+async def all_workers_station(callback: types.CallbackQuery, state: FSMContext):
     _, station_id = callback.data.split(":")
     station_id = int(station_id)
 
@@ -296,18 +376,67 @@ async def all_workers_station(callback: types.CallbackQuery):
 
     # Xodimlarni olish
     workers = await db_conn.fetch(
-        "SELECT full_name, tabel FROM workers WHERE station_id=$1 ORDER BY id", station_id
+        "SELECT id, full_name, tabel, position, smena FROM workers WHERE station_id=$1 ORDER BY id", 
+        station_id
     )
 
     if not workers:
         return await callback.message.edit_text(f"❌ {station_name} bekatida xodim yo‘q.")
 
-    # Raqamlar bilan chiqarish
+    # Raqamlar bilan chiqarish (tugmasiz)
     text = f"🏢 Bekat: {station_name}\n📝 Xodimlar ro‘yxati:\n\n"
     for idx, w in enumerate(workers, start=1):
-        text += f"{idx}. {w['full_name']} — {w['tabel']}\n"
+        text += f"{idx}. {w['full_name']} — {w['tabel']} — {w['position']} — {w['smena']}\n"
+
+    text += "\n✍️ Kerakli xodim raqamini yozing (masalan: 1)"
 
     await callback.message.edit_text(text)
+
+    # STATEga saqlash
+    await state.set_state(WorkerSelect.waiting_for_number)
+    await state.update_data(workers=[dict(w) for w in workers])
+
+
+# ================================
+# WORKER DETAIL (raqam yozilganda)
+@dp.message(WorkerSelect.waiting_for_number)
+async def worker_detail(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    workers = data.get("workers", [])
+
+    if not message.text.isdigit():
+        return await message.answer("❌ Iltimos, faqat raqam yozing (masalan: 1).")
+
+    idx = int(message.text)
+    if idx < 1 or idx > len(workers):
+        return await message.answer("❌ Noto‘g‘ri raqam, ro‘yxatdan tanlang.")
+
+    worker = workers[idx - 1]
+
+    # Batafsil ma'lumot olish
+    w = await db_conn.fetchrow(
+        "SELECT w.full_name, w.tabel, w.position, w.smena, w.photo, s.name AS station_name "
+        "FROM workers w "
+        "JOIN stations s ON w.station_id = s.id "
+        "WHERE w.id=$1", 
+        worker["id"]
+    )
+
+    caption = (
+        f"👤 {w['full_name']}\n"
+        f"🔢 Tabel: {w['tabel']}\n"
+        f"💼 Lavozim: {w['position']}\n"
+        f"🕒 Smena: {w['smena']}\n"
+        f"🏢 Bekat: {w['station_name']}"
+    )
+
+    if w['photo']:
+        await message.answer_photo(photo=w['photo'], caption=caption)
+    else:
+        await message.answer(caption)
+
+    # State tugatish
+    await state.clear()
 
 
 # ================================
@@ -425,7 +554,7 @@ async def ask_position(message: types.Message):
     user_states[message.from_user.id]["state"] = "ASK_POSITION"
 
     # Lavozim variantlari
-    positions = ["ДСЦП", "ДСП", "ДСПО", "ДСПЕ", "ОПЕРАТОР", "КАТТА ОПЕРАТОР", "УПП"]
+    positions = ["ДСЦП", "ДСП", "ДСПО", "ДСПЕ", "ОПЕРАТОР", "КАТТА ОПЕРАТОР", "УПП", "БЕКАТ БОШЛИҒИ"]
     kb = InlineKeyboardBuilder()
     for pos in positions:
         kb.button(text=pos, callback_data=f"choose_position:{pos}")
@@ -503,7 +632,7 @@ async def save_worker(message: types.Message):
 
 
 # ================================
-# ================================
+
 # Bekat boshlig‘i – xodimni o‘zgartirish
 @dp.message(F.text == "✏️ Xodimni o'zgartirish")
 async def choose_worker(message: types.Message):
@@ -552,14 +681,28 @@ async def show_worker_fields(user_id, message_or_callback, worker_id):
         f"3. 💼 Lavozim: {db_worker['position']}\n"
         f"4. 🕒 Smena: {db_worker['smena']}\n"
         f"5. 🏢 Bekat: {station_name}\n"
+        f"6. 🖼 Rasm\n"
     )
 
     user_states[user_id] = {"state": "edit_worker_field", "worker_id": worker_id}
 
-    if isinstance(message_or_callback, types.Message):
-        await message_or_callback.answer(text + "\n✏️ Qaysi maydonni o‘zgartirasiz? Raqam yuboring:")
+    # Agar rasm bor bo‘lsa, uni chiqaramiz
+    if db_worker["photo"]:
+        if isinstance(message_or_callback, types.Message):
+            await message_or_callback.answer_photo(
+                photo=db_worker["photo"], 
+                caption=text + "\n✏️ Qaysi maydonni o‘zgartirasiz? Raqam yuboring:"
+            )
+        else:
+            await message_or_callback.message.answer_photo(
+                photo=db_worker["photo"], 
+                caption=text + "\n✏️ Qaysi maydonni o‘zgartirasiz? Raqam yuboring:"
+            )
     else:
-        await message_or_callback.message.answer(text + "\n✏️ Qaysi maydonni o‘zgartirasiz? Raqam yuboring:")
+        if isinstance(message_or_callback, types.Message):
+            await message_or_callback.answer(text + "\n✏️ Qaysi maydonni o‘zgartirasiz? Raqam yuboring:")
+        else:
+            await message_or_callback.message.answer(text + "\n✏️ Qaysi maydonni o‘zgartirasiz? Raqam yuboring:")
 
 
 # ================================
@@ -569,7 +712,7 @@ async def edit_worker_field(message: types.Message):
     state = user_states[message.from_user.id]
     worker_id = state["worker_id"]
 
-    if not message.text.isdigit() or not (1 <= int(message.text) <= 5):
+    if not message.text.isdigit() or not (1 <= int(message.text) <= 6):
         return await message.answer("❌ Noto‘g‘ri raqam. Qayta kiriting:")
 
     choice = int(message.text)
@@ -604,6 +747,10 @@ async def edit_worker_field(message: types.Message):
             kb.button(text=st["name"], callback_data=f"changestation:{worker_id}:{st['id']}")  
         kb.adjust(2)
         return await message.answer("🏢 Yangi bekatni tanlang:", reply_markup=kb.as_markup())
+
+    elif choice == 6:  # Rasm
+        state["state"] = "edit_photo"
+        return await message.answer("🖼 Yangi rasmni yuboring (jpg/png):")
 
 
 # ================================
@@ -662,6 +809,22 @@ async def process_edit_tabel(message: types.Message):
 
 
 # ================================
+# Rasmni yangilash
+@dp.message(lambda m: user_states.get(m.from_user.id, {}).get("state") == "edit_photo", F.photo)
+async def process_edit_photo(message: types.Message):
+    state = user_states[message.from_user.id]
+    worker_id = state["worker_id"]
+
+    # Eng sifatli variantni olish
+    file_id = message.photo[-1].file_id
+
+    await db_conn.execute("UPDATE workers SET photo=$1 WHERE id=$2", file_id, worker_id)
+    await message.answer("✅ Rasm yangilandi")
+
+    await ask_edit_more(message.from_user.id, message, worker_id)
+
+
+# ================================
 # O‘zgartirishdan keyin "Ha / Yo‘q" tugmasi
 async def ask_edit_more(user_id, message_or_callback, worker_id):
     kb = ReplyKeyboardMarkup(
@@ -677,6 +840,7 @@ async def ask_edit_more(user_id, message_or_callback, worker_id):
 
 
 # ================================
+# ================================
 # Ha / Yo‘q tugmalarini qayta ishlash
 @dp.message(lambda m: user_states.get(m.from_user.id, {}).get("state") == "edit_more")
 async def edit_more_choice(message: types.Message):
@@ -685,12 +849,31 @@ async def edit_more_choice(message: types.Message):
 
     if message.text == "Ha":
         await show_worker_fields(message.from_user.id, message, worker_id)
+
     elif message.text == "Yo‘q":
+        # ✅ Saqlashdan oldin xodimning yangilangan ma’lumotlarini olib kelamiz
+        worker = await db_conn.fetchrow("SELECT * FROM workers WHERE id=$1", worker_id)
+        station_name = await db_conn.fetchval("SELECT name FROM stations WHERE id=$1", worker["station_id"])
+
+        # Guruhga xabar yuborish
+        await send_to_group(
+            f"✏️ Xodim ma’lumotlari yangilandi!📌\n\n"
+            f"👤 F.I.O: {worker['full_name']}\n"
+            f"🔢 Tabel: {worker['tabel']}\n"
+            f"💼 Lavozim: {worker['position']}\n"
+            f"🕒 Smena: {worker['smena']}\n"
+            f"🏢 Bekat: {station_name}"
+        )
+
+        # State tozalash
         user_states.pop(message.from_user.id, None)
+
         # ✅ Saqlangandan keyin bosh menyu qaytariladi
         await message.answer("✅ O‘zgarishlar saqlandi.", reply_markup=main_kb)
+
     else:
         await message.answer("❌ Faqat 'Ha' yoki 'Yo‘q' tugmasidan foydalaning.")
+
 
 
 async def main(): 
