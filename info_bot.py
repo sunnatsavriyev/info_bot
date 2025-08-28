@@ -651,7 +651,10 @@ async def choose_worker(message: types.Message):
     if not station_id:
         return await message.answer("❌ Siz boshliq emassiz.")
 
-    workers = await db_conn.fetch("SELECT id, full_name FROM workers WHERE station_id=$1", station_id)
+    workers = await db_conn.fetch(
+        "SELECT id, full_name, tabel FROM workers WHERE station_id=$1 ORDER BY id",
+        station_id
+    )
     if not workers:
         return await message.answer("❌ Sizda hozircha xodimlar yo‘q.")
 
