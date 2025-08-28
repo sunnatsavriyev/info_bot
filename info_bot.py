@@ -41,6 +41,7 @@ main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Xodim qo'shish")],
         [KeyboardButton(text="✏️ Xodimni o'zgartirish")],
+        [KeyboardButton(text="❌ Xodimni o'chirish")],
         [KeyboardButton(text="Mening xodimlarim")]
     ],
     resize_keyboard=True
@@ -95,7 +96,7 @@ async def setup_db():
             full_name TEXT NOT NULL,
             tabel VARCHAR(10) NOT NULL,
             position TEXT NOT NULL,
-            smena INT NOT NULL,
+            smena TEXT NOT NULL,
             station_id INT REFERENCES stations(id) ON DELETE CASCADE,
             photo TEXT
         );
@@ -122,7 +123,6 @@ async def get_head_station(user_id):
     )
     return row["station_id"] if row else None
 
-# ================================
 # ================================
 # HELP komandasi
 @dp.message(Command("help"))
@@ -561,7 +561,6 @@ async def ask_position(message: types.Message):
     kb.adjust(2)
     await message.answer("💼 Lavozimni tanlang:", reply_markup=kb.as_markup())
 
-
 # Inline tanlash - lavozim
 @dp.callback_query(F.data.startswith("choose_position:"))
 async def choose_position(callback: types.CallbackQuery):
@@ -569,22 +568,34 @@ async def choose_position(callback: types.CallbackQuery):
     user_states[callback.from_user.id]["position"] = position
     user_states[callback.from_user.id]["state"] = "ASK_SMENA"
 
+    # smena variantlari
+    smena_variants = [
+        "Кундузги", "Кечги", "ТМТ",
+        "17 режим", "17 режим кундузги 7-19", "15 - режим 8-20"
+    ]
     kb = InlineKeyboardBuilder()
-    for smena in range(1, 5):
-        kb.button(text=f"{smena}-smena", callback_data=f"choose_smena:{smena}")
+    for sm in smena_variants:
+        kb.button(text=sm, callback_data=f"choose_smena:{sm}")
     kb.adjust(2)
 
-    await callback.message.edit_text(f"✅ Lavozim: {position}\n\n🕒 Endi smenasini tanlang:", reply_markup=kb.as_markup())
+    await callback.message.edit_text(
+        f"✅ Lavozim: {position}\n\n🕒 Endi smenasini tanlang:",
+        reply_markup=kb.as_markup()
+    )
 
 
 # Inline tanlash - smena
 @dp.callback_query(F.data.startswith("choose_smena:"))
 async def choose_smena(callback: types.CallbackQuery):
-    smena = callback.data.split(":")[1]
+    smena = callback.data.split(":", 1)[1]
+
     user_states[callback.from_user.id]["smena"] = smena
     user_states[callback.from_user.id]["state"] = "ASK_PHOTO"
 
-    await callback.message.edit_text(f"✅ Smena: {smena}\n\n🖼️ Xodimning rasm linkini yuboring yoki rasmini yuboring (jpg, png, webp):")
+    await callback.message.edit_text(
+        f"✅ Smena: {smena}\n\n🖼️ Endi xodimning rasm linkini yuboring yoki rasmini yuboring (jpg, png, webp):"
+    )
+
 
 
 # Rasm qabul qilish va saqlash
@@ -612,7 +623,7 @@ async def save_worker(message: types.Message):
         user_states[message.from_user.id]["full_name"],
         user_states[message.from_user.id]["tabel"],
         user_states[message.from_user.id]["position"],
-        int(user_states[message.from_user.id]["smena"]),
+        user_states[message.from_user.id]["smena"],
         station_id,
         photo
     )
@@ -646,7 +657,7 @@ async def choose_worker(message: types.Message):
 
     text = "👥 Xodimlar ro‘yxati:\n\n"
     for i, w in enumerate(workers, start=1):
-        text += f"{i}. {w['full_name']}\n"
+        text += f"{i}. {w['full_name']} — {w['tabel']}\n "
 
     user_states[message.from_user.id] = {"state": "choose_worker", "workers": workers}
     await message.answer(text + "\n✏️ Qaysi xodimni tahrir qilmoqchisiz? Raqam yuboring:")
@@ -733,10 +744,14 @@ async def edit_worker_field(message: types.Message):
         kb.adjust(2)
         return await message.answer("💼 Yangi lavozimni tanlang:", reply_markup=kb.as_markup())
 
-    elif choice == 4:  # Smena
+    elif choice == 4:  # Smena (inline qilib beramiz)
+        smena_variants = [
+            "Кундузги", "Кечги", "ТМТ",
+            "17 режим", "17 режим кундузги 7-19", "15 - режим 8-20"
+        ]
         kb = InlineKeyboardBuilder()
-        for smena in range(1, 5):
-            kb.button(text=f"{smena}-smena", callback_data=f"edit_smena:{worker_id}:{smena}")
+        for sm in smena_variants:
+            kb.button(text=sm, callback_data=f"edit_smena:{worker_id}:{sm}")
         kb.adjust(2)
         return await message.answer("🕒 Yangi smenani tanlang:", reply_markup=kb.as_markup())
 
@@ -753,6 +768,7 @@ async def edit_worker_field(message: types.Message):
         return await message.answer("🖼 Yangi rasmni yuboring (jpg/png):")
 
 
+
 # ================================
 # Inline callback – Lavozimni yangilash
 @dp.callback_query(F.data.startswith("edit_position"))
@@ -766,8 +782,8 @@ async def process_edit_position(call: types.CallbackQuery):
 # Inline callback – Smena yangilash
 @dp.callback_query(F.data.startswith("edit_smena"))
 async def process_edit_smena(call: types.CallbackQuery):
-    _, worker_id, smena = call.data.split(":")
-    await db_conn.execute("UPDATE workers SET smena=$1 WHERE id=$2", int(smena), int(worker_id))
+    _, worker_id, smena = call.data.split(":", 2)  # faqat 2 qismga emas, 3 qismga bo‘lamiz
+    await db_conn.execute("UPDATE workers SET smena=$1 WHERE id=$2", smena, int(worker_id))
     await call.answer("✅ Smena yangilandi")
     await ask_edit_more(call.from_user.id, call, int(worker_id))
 
@@ -873,6 +889,68 @@ async def edit_more_choice(message: types.Message):
 
     else:
         await message.answer("❌ Faqat 'Ha' yoki 'Yo‘q' tugmasidan foydalaning.")
+
+
+
+# ================================
+# Bekat boshlig‘i – xodimni o‘chirish
+@dp.message(F.text == "❌ Xodimni o'chirish")
+async def choose_worker_delete(message: types.Message):
+    station_id = await get_head_station(message.from_user.id)
+    if not station_id:
+        return await message.answer("❌ Siz boshliq emassiz.")
+
+    workers = await db_conn.fetch("SELECT id, full_name, tabel FROM workers WHERE station_id=$1", station_id)
+    if not workers:
+        return await message.answer("❌ Sizda hozircha xodimlar yo‘q.")
+
+    text = "🗑 Xodimlar ro‘yxati:\n\n"
+    for i, w in enumerate(workers, start=1):
+        text += f"{i}. {w['full_name']} | Tabel: {w['tabel']}\n"
+
+    user_states[message.from_user.id] = {"state": "delete_worker", "workers": workers}
+    await message.answer(text + "\n✏️ Qaysi xodimni o'chirmoqchisiz? Raqam yuboring:")
+
+# ================================
+# Xodim raqamini qabul qilish va o'chirish
+@dp.message(lambda m: user_states.get(m.from_user.id, {}).get("state") == "delete_worker")
+async def delete_worker_confirm(message: types.Message):
+    state = user_states[message.from_user.id]
+    workers = state["workers"]
+
+    if not message.text.isdigit() or not (1 <= int(message.text) <= len(workers)):
+        return await message.answer("❌ Noto‘g‘ri raqam. Qayta kiriting:")
+
+    idx = int(message.text) - 1
+    worker = workers[idx]
+    worker_id = worker["id"]
+
+    # Inline tugma bilan tasdiqlash
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Ha, o'chirish", callback_data=f"confirm_delete:{worker_id}")
+    kb.button(text="❌ Bekor qilish", callback_data="cancel_delete")
+    kb.adjust(2)
+
+    await message.answer(f"⚠️ {worker['full_name']} ni o‘chirmoqchimisiz?", reply_markup=kb.as_markup())
+    user_states[message.from_user.id]["state"] = "delete_confirm"
+    user_states[message.from_user.id]["worker_id"] = worker_id
+
+# ================================
+# Inline callback – xodimni o'chirish
+@dp.callback_query(F.data.startswith("confirm_delete"))
+async def process_delete_worker(call: types.CallbackQuery):
+    _, worker_id = call.data.split(":")
+    await db_conn.execute("DELETE FROM workers WHERE id=$1", int(worker_id))
+    await call.answer("✅ Xodim o‘chirildi")
+    await call.message.edit_text("✅ Xodim muvaffaqiyatli o‘chirildi.")
+    user_states.pop(call.from_user.id, None)
+
+# ================================
+# Bekor qilish callback
+@dp.callback_query(F.data == "cancel_delete")
+async def cancel_delete_worker(call: types.CallbackQuery):
+    await call.message.edit_text("❌ Xodimni o‘chirish bekor qilindi.")
+    user_states.pop(call.from_user.id, None)
 
 
 
